@@ -1,0 +1,797 @@
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Image to PDF Converter</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- jsPDF library for PDF generation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <!-- heic2any library for HEIC/HEIF image support -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/heic2any/0.0.4/heic2any.min.js"></script>
+    <!-- React libraries -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- Babel for JSX/TS transpilation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script type="importmap">
+{
+  "imports": {
+    "react": "https://aistudiocdn.com/react@^19.1.1",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.1.1/",
+    "react/": "https://aistudiocdn.com/react@^19.1.1/"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="bg-slate-100">
+    <div id="root"></div>
+    <script type="text/babel">
+// --- From types.ts ---
+const PageOrientation = { Portrait: 'portrait', Landscape: 'landscape' };
+const PageSize = { A4: 'a4', Letter: 'letter', Legal: 'legal' };
+const ImageFit = { Fit: 'fit', Original: 'original', Grid: 'grid' };
+const CompressionLevel = { High: 'high', Medium: 'medium', Low: 'low' };
+const GridValue = { OneByOne: '1x1', TwoByTwo: '2x2', ThreeByThree: '3x3' };
+const PageNumberPosition = { TopLeft: 'top-left', TopCenter: 'top-center', TopRight: 'top-right', BottomLeft: 'bottom-left', BottomCenter: 'bottom-center', BottomRight: 'bottom-right' };
+
+// --- From services/pdfService.ts ---
+const PAGE_DIMENSIONS = {
+    a4: { width: 210, height: 297 },
+    letter: { width: 215.9, height: 279.4 },
+    legal: { width: 215.9, height: 355.6 },
+};
+
+const getCompressionQuality = (level) => {
+    switch (level) {
+        case CompressionLevel.High: return 1.0;
+        case CompressionLevel.Medium: return 0.8;
+        case CompressionLevel.Low: return 0.6;
+        default: return 0.8;
+    }
+};
+
+const loadImage = (url) => {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = url;
+    });
+};
+
+const getRotatedImageData = async (image) => {
+    if (image.rotation === 0) {
+        const imgEl = await loadImage(image.previewUrl);
+        return { dataUrl: image.previewUrl, width: imgEl.width, height: imgEl.height };
+    }
+    
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+
+            const angle = image.rotation * Math.PI / 180;
+            const isSideways = image.rotation === 90 || image.rotation === 270;
+
+            canvas.width = isSideways ? img.height : img.width;
+            canvas.height = isSideways ? img.width : img.height;
+
+            ctx.translate(canvas.width / 2, canvas.height / 2);
+            ctx.rotate(angle);
+            ctx.drawImage(img, -img.width / 2, -img.height / 2);
+
+            resolve({ dataUrl: canvas.toDataURL(image.file.type), width: canvas.width, height: canvas.height });
+        };
+        img.src = image.previewUrl;
+    });
+};
+
+const addPageNumbers = (doc, settings) => {
+    const pageCount = doc.internal.getNumberOfPages();
+    if (!settings.pageNumber.enabled || pageCount <= 0) {
+        return;
+    }
+
+    const { fontSize, color, position } = settings.pageNumber;
+    const pageDims = PAGE_DIMENSIONS[settings.pageSize];
+    const pageW = settings.orientation === 'portrait' ? pageDims.width : pageDims.height;
+    const pageH = settings.orientation === 'portrait' ? pageDims.height : pageDims.width;
+    
+    const yOffset = 5;
+    const xOffset = 5;
+
+    doc.setFontSize(fontSize);
+    doc.setTextColor(color);
+
+    for (let i = 1; i <= pageCount; i++) {
+        doc.setPage(i);
+        const text = `${i} / ${pageCount}`;
+        
+        let x, y;
+        let align = 'center';
+
+        switch (position) {
+            case PageNumberPosition.TopLeft:
+                x = xOffset;
+                y = yOffset + (fontSize * 0.35); // jsPDF y is baseline
+                align = 'left';
+                break;
+            case PageNumberPosition.TopCenter:
+                x = pageW / 2;
+                y = yOffset + (fontSize * 0.35);
+                align = 'center';
+                break;
+            case PageNumberPosition.TopRight:
+                x = pageW - xOffset;
+                y = yOffset + (fontSize * 0.35);
+                align = 'right';
+                break;
+            case PageNumberPosition.BottomLeft:
+                x = xOffset;
+                y = pageH - yOffset;
+                align = 'left';
+                break;
+            case PageNumberPosition.BottomRight:
+                x = pageW - xOffset;
+                y = pageH - yOffset;
+                align = 'right';
+                break;
+            case PageNumberPosition.BottomCenter:
+            default:
+                x = pageW / 2;
+                y = pageH - yOffset;
+                align = 'center';
+                break;
+        }
+
+        doc.text(text, x, y, { align });
+    }
+};
+
+const generatePdf = async (images, settings) => {
+    const { jsPDF } = jspdf;
+    const doc = new jsPDF({
+        orientation: settings.orientation,
+        unit: 'mm',
+        format: settings.pageSize
+    });
+
+    const pageDims = PAGE_DIMENSIONS[settings.pageSize];
+    const pageW = settings.orientation === 'portrait' ? pageDims.width : pageDims.height;
+    const pageH = settings.orientation === 'portrait' ? pageDims.height : pageDims.width;
+    const margin = { t: settings.marginTop, r: settings.marginRight, b: settings.marginBottom, l: settings.marginLeft };
+    const contentW = pageW - margin.l - margin.r;
+    const contentH = pageH - margin.t - margin.b;
+    
+    const [gridCols, gridRows] = settings.grid.split('x').map(Number);
+    const imagesPerGridPage = gridCols * gridRows;
+    let imageCounter = 0;
+
+    for (const image of images) {
+        if (imageCounter > 0) {
+            if (settings.imageFit !== ImageFit.Grid || imageCounter % imagesPerGridPage === 0) {
+                doc.addPage();
+            }
+        }
+        
+        const { dataUrl, width: imgW, height: imgH } = await getRotatedImageData(image);
+        
+        let x = margin.l;
+        let y = margin.t;
+        let w = contentW;
+        let h = contentH;
+
+        if (settings.imageFit === ImageFit.Fit) {
+            const imgRatio = imgW / imgH;
+            const contentRatio = contentW / contentH;
+            if (imgRatio > contentRatio) {
+                h = contentW / imgRatio;
+                y += (contentH - h) / 2;
+            } else {
+                w = contentH * imgRatio;
+                x += (contentW - w) / 2;
+            }
+             doc.addImage(dataUrl, 'JPEG', x, y, w, h, undefined, 'FAST');
+        } else if (settings.imageFit === ImageFit.Original) {
+            // NOTE: jsPDF uses a fixed DPI of 72. 1mm = 2.83465 points (pixels).
+            const mmToPx = 2.83465;
+            w = imgW / mmToPx;
+            h = imgH / mmToPx;
+            x += (contentW - w) / 2; // center it
+            y += (contentH - h) / 2;
+            doc.addImage(dataUrl, 'JPEG', x, y, w, h, undefined, 'FAST');
+        } else if (settings.imageFit === ImageFit.Grid) {
+            const gridIndex = imageCounter % imagesPerGridPage;
+            const cellW = contentW / gridCols;
+            const cellH = contentH / gridRows;
+            
+            const cellX = margin.l + (gridIndex % gridCols) * cellW;
+            const cellY = margin.t + Math.floor(gridIndex / gridCols) * cellH;
+
+            const imgRatio = imgW / imgH;
+            const cellRatio = cellW / cellH;
+
+            if (imgRatio > cellRatio) {
+                h = cellW / imgRatio;
+                w = cellW;
+                y = cellY + (cellH - h) / 2;
+                x = cellX;
+            } else {
+                w = cellH * imgRatio;
+                h = cellH;
+                x = cellX + (cellW - w) / 2;
+                y = cellY;
+            }
+             doc.addImage(dataUrl, 'JPEG', x, y, w, h, undefined, 'FAST');
+        }
+        
+        imageCounter++;
+    }
+    
+    addPageNumbers(doc, settings);
+
+    doc.save('converted-images.pdf');
+};
+
+// --- From components/Spinner.tsx ---
+const Spinner = () => {
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex justify-center items-center">
+            <div className="flex flex-col items-center">
+                <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-white"></div>
+                <p className="mt-4 text-white text-lg font-semibold">Generating PDF...</p>
+                <p className="mt-2 text-white text-sm">This may take a moment for large images.</p>
+            </div>
+        </div>
+    );
+};
+
+// --- From components/Header.tsx ---
+const Header = () => (
+    <header className="bg-white shadow-md">
+        <div className="container mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex items-center justify-between h-16">
+                <div className="flex items-center space-x-3">
+                     <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-indigo-600" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clipRule="evenodd" />
+                    </svg>
+                    <h1 className="text-2xl font-bold text-slate-800">Image to PDF</h1>
+                </div>
+            </div>
+        </div>
+    </header>
+);
+
+// --- From components/ImageUpload.tsx ---
+const ImageUpload = ({ onFilesAdded, isDragging, setIsDragging }) => {
+    const fileInputRef = React.useRef(null);
+
+    const handleDragEnter = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragging(true);
+    };
+
+    const handleDragLeave = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragging(false);
+    };
+
+    const handleDragOver = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+    };
+
+    const handleDrop = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragging(false);
+        const files = e.dataTransfer.files;
+        if (files && files.length > 0) {
+            onFilesAdded(files);
+        }
+    };
+
+    const handleFileSelect = (e) => {
+        const files = e.target.files;
+        if (files && files.length > 0) {
+            onFilesAdded(files);
+        }
+    };
+
+    const handleUploadClick = () => {
+        fileInputRef.current?.click();
+    };
+    
+    const acceptedFormats = "image/jpeg, image/png, image/webp, image/heic, image/heif, image/bmp";
+
+    return (
+        <div
+            className={`flex justify-center items-center w-full p-8 border-4 border-dashed rounded-xl transition-colors duration-300
+                ${isDragging ? 'border-indigo-500 bg-indigo-50' : 'border-slate-300 bg-white hover:border-slate-400'}`}
+            onDragEnter={handleDragEnter}
+            onDragLeave={handleDragLeave}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+        >
+            <div className="text-center">
+                 <svg xmlns="http://www.w3.org/2000/svg" className="mx-auto h-12 w-12 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                <h3 className="mt-2 text-lg font-medium text-slate-800">Drag & drop your images here</h3>
+                <p className="mt-1 text-sm text-slate-500">or</p>
+                <button
+                    type="button"
+                    onClick={handleUploadClick}
+                    className="mt-4 inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                >
+                    Select Files
+                </button>
+                <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    accept={acceptedFormats}
+                    className="hidden"
+                    onChange={handleFileSelect}
+                />
+                 <p className="mt-4 text-xs text-slate-400">Supports: JPG, PNG, WEBP, HEIC, BMP</p>
+            </div>
+        </div>
+    );
+};
+
+// --- From components/ImagePreview.tsx ---
+const ImagePreview = ({ image, onDelete, onRotate, onDragStart, onDrop, isDragged }) => {
+    const [isDragOver, setIsDragOver] = React.useState(false);
+
+    const handleDragStart = (e) => {
+        onDragStart(image.id);
+    };
+
+    const handleDragOver = (e) => {
+        e.preventDefault();
+        setIsDragOver(true);
+    };
+
+    const handleDragLeave = (e) => {
+        e.preventDefault();
+        setIsDragOver(false);
+    };
+
+    const handleDrop = (e) => {
+        e.preventDefault();
+        onDrop(image.id);
+        setIsDragOver(false);
+    };
+    
+    return (
+        <div
+            draggable
+            onDragStart={handleDragStart}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={`relative group aspect-w-1 aspect-h-1 rounded-lg overflow-hidden border-2
+                ${isDragged ? 'border-indigo-500 opacity-50' : 'border-transparent'}
+                ${isDragOver ? 'border-indigo-500' : ''}`}
+        >
+            <img
+                src={image.previewUrl}
+                alt={image.file.name}
+                className="object-cover w-full h-full transition-transform duration-300"
+                style={{ transform: `rotate(${image.rotation}deg)` }}
+            />
+            <div className="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-50 transition-all duration-300 flex items-center justify-center">
+                <div className="flex items-center space-x-3 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                    <button
+                        onClick={() => onRotate(image.id)}
+                        className="p-2 rounded-full bg-white/80 hover:bg-white text-slate-700"
+                        title="Rotate 90°"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                            <path fillRule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 110 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clipRule="evenodd" />
+                        </svg>
+                    </button>
+                    <button
+                        onClick={() => onDelete(image.id)}
+                        className="p-2 rounded-full bg-white/80 hover:bg-white text-red-600"
+                        title="Delete"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                            <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm4 0a1 1 0 012 0v6a1 1 0 11-2 0V8z" clipRule="evenodd" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+             <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-2">
+                <p className="text-white text-xs truncate">{image.file.name}</p>
+            </div>
+        </div>
+    );
+};
+
+// --- From components/SettingsPanel.tsx ---
+const SettingsPanel = ({ settings, onSettingsChange, onConvert, isDisabled }) => {
+    const handleSettingChange = (key, value) => {
+        onSettingsChange({ ...settings, [key]: value });
+    };
+    
+    const handlePageNumberChange = (key, value) => {
+        onSettingsChange({
+            ...settings,
+            pageNumber: {
+                ...settings.pageNumber,
+                [key]: value,
+            },
+        });
+    };
+    
+    // Helper sub-components
+    const SelectBox = ({ label, value, onChange, options }) => (
+        <div>
+            <label htmlFor={label} className="sr-only">{label}</label>
+            <select id={label} value={value} onChange={onChange} className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-slate-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md">
+                {options.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+            </select>
+        </div>
+    );
+
+    const NumberInput = ({ label, value, onChange }) => (
+        <div>
+            <label htmlFor={label} className="block text-xs text-slate-500">{label}</label>
+            <input
+                type="number"
+                id={label}
+                value={value}
+                onChange={(e) => onChange(parseInt(e.target.value, 10) || 0)}
+                min="0"
+                className="mt-1 block w-full border border-slate-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+            />
+        </div>
+    );
+
+    const RadioGroup = ({ name, value, onChange, options }) => (
+        <div className="flex space-x-2 rounded-lg bg-slate-100 p-1">
+            {options.map(opt => (
+                <button key={opt.value} onClick={() => onChange(opt.value)} className={`w-full rounded-md py-1.5 text-sm font-medium transition-colors ${value === opt.value ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-600 hover:bg-slate-200'}`}>
+                    {opt.label}
+                </button>
+            ))}
+        </div>
+    );
+
+    const ColorInput = ({ label, value, onChange }) => (
+        <div>
+            <label htmlFor={label} className="block text-xs text-slate-500">{label}</label>
+            <div className="mt-1 flex items-center space-x-2 border border-slate-300 rounded-md shadow-sm py-1.5 px-2 focus-within:ring-1 focus-within:ring-indigo-500 focus-within:border-indigo-500">
+                <input
+                    type="color"
+                    id={`${label}-picker`}
+                    value={value}
+                    onChange={(e) => onChange(e.target.value)}
+                    className="h-5 w-6 border-none p-0 bg-transparent cursor-pointer"
+                    aria-label="Color picker"
+                />
+                <input
+                    type="text"
+                    id={label}
+                    value={value}
+                    onChange={(e) => onChange(e.target.value)}
+                    className="block w-full border-none p-0 focus:ring-0 sm:text-sm"
+                />
+            </div>
+        </div>
+    );
+
+    return (
+        <div className="space-y-6">
+            <h2 className="text-2xl font-bold text-slate-800 border-b pb-3">PDF Settings</h2>
+            
+            {/* Page Layout */}
+            <div>
+                <label className="block text-sm font-medium text-slate-700">Page Layout</label>
+                <div className="mt-2 grid grid-cols-2 gap-3">
+                    <SelectBox
+                        label="Orientation"
+                        value={settings.orientation}
+                        onChange={(e) => handleSettingChange('orientation', e.target.value)}
+                        options={[
+                            { value: PageOrientation.Portrait, label: 'Portrait' },
+                            { value: PageOrientation.Landscape, label: 'Landscape' },
+                        ]}
+                    />
+                     <SelectBox
+                        label="Page Size"
+                        value={settings.pageSize}
+                        onChange={(e) => handleSettingChange('pageSize', e.target.value)}
+                        options={[
+                            { value: PageSize.A4, label: 'A4' },
+                            { value: PageSize.Letter, label: 'Letter' },
+                            { value: PageSize.Legal, label: 'Legal' },
+                        ]}
+                    />
+                </div>
+            </div>
+
+            {/* Image Fit */}
+            <div>
+                <label className="block text-sm font-medium text-slate-700">Image Fit</label>
+                 <div className="mt-2">
+                    <RadioGroup
+                        name="imageFit"
+                        value={settings.imageFit}
+                        onChange={(val) => handleSettingChange('imageFit', val)}
+                        options={[
+                            { value: ImageFit.Fit, label: 'Fit to Page' },
+                            { value: ImageFit.Original, label: 'Original Size' },
+                            { value: ImageFit.Grid, label: 'Grid' },
+                        ]}
+                    />
+                 </div>
+                 {settings.imageFit === ImageFit.Grid && (
+                     <div className="mt-3 pl-4">
+                         <SelectBox
+                            label="Grid Layout"
+                            value={settings.grid}
+                            onChange={(e) => handleSettingChange('grid', e.target.value)}
+                            options={[
+                                { value: GridValue.OneByOne, label: '1x1' },
+                                { value: GridValue.TwoByTwo, label: '2x2' },
+                                { value: GridValue.ThreeByThree, label: '3x3' },
+                            ]}
+                        />
+                     </div>
+                 )}
+            </div>
+
+            {/* Margins */}
+            <div>
+                <label className="block text-sm font-medium text-slate-700">Page Margins (mm)</label>
+                <div className="mt-2 grid grid-cols-2 gap-3">
+                    <NumberInput label="Top" value={settings.marginTop} onChange={(val) => handleSettingChange('marginTop', val)} />
+                    <NumberInput label="Bottom" value={settings.marginBottom} onChange={(val) => handleSettingChange('marginBottom', val)} />
+                    <NumberInput label="Left" value={settings.marginLeft} onChange={(val) => handleSettingChange('marginLeft', val)} />
+                    <NumberInput label="Right" value={settings.marginRight} onChange={(val) => handleSettingChange('marginRight', val)} />
+                </div>
+            </div>
+
+            {/* Compression */}
+             <div>
+                <label className="block text-sm font-medium text-slate-700">Image Compression</label>
+                <div className="mt-2">
+                     <SelectBox
+                        label="Quality"
+                        value={settings.compression}
+                        onChange={(e) => handleSettingChange('compression', e.target.value)}
+                        options={[
+                            { value: CompressionLevel.Low, label: 'Low (Smaller File)' },
+                            { value: CompressionLevel.Medium, label: 'Medium (Balanced)' },
+                            { value: CompressionLevel.High, label: 'High (Best Quality)' },
+                        ]}
+                    />
+                </div>
+            </div>
+
+            {/* Page Numbers */}
+            <div>
+                <label className="flex items-center space-x-2 text-sm font-medium text-slate-700 cursor-pointer">
+                    <input
+                        type="checkbox"
+                        checked={settings.pageNumber.enabled}
+                        onChange={(e) => handlePageNumberChange('enabled', e.target.checked)}
+                        className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span>Add Page Numbers</span>
+                </label>
+                {settings.pageNumber.enabled && (
+                    <div className="mt-3 pl-6 space-y-4 border-l border-slate-200 ml-2">
+                        <div>
+                            <SelectBox
+                                label="Position"
+                                value={settings.pageNumber.position}
+                                onChange={(e) => handlePageNumberChange('position', e.target.value)}
+                                options={[
+                                    { value: PageNumberPosition.BottomCenter, label: 'Bottom Center' },
+                                    { value: PageNumberPosition.BottomLeft, label: 'Bottom Left' },
+                                    { value: PageNumberPosition.BottomRight, label: 'Bottom Right' },
+                                    { value: PageNumberPosition.TopCenter, label: 'Top Center' },
+                                    { value: PageNumberPosition.TopLeft, label: 'Top Left' },
+                                    { value: PageNumberPosition.TopRight, label: 'Top Right' },
+                                ]}
+                            />
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                            <NumberInput 
+                                label="Font Size" 
+                                value={settings.pageNumber.fontSize} 
+                                onChange={(val) => handlePageNumberChange('fontSize', val < 1 ? 1 : val)} 
+                            />
+                            <ColorInput
+                                label="Color"
+                                value={settings.pageNumber.color}
+                                onChange={(val) => handlePageNumberChange('color', val)}
+                            />
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            <button
+                onClick={onConvert}
+                disabled={isDisabled}
+                className="w-full inline-flex justify-center items-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:bg-slate-400 disabled:cursor-not-allowed"
+            >
+                Convert to PDF
+            </button>
+        </div>
+    );
+};
+
+
+// --- From App.tsx ---
+const App = () => {
+    const { useState, useCallback } = React;
+    const [images, setImages] = useState([]);
+    const [settings, setSettings] = useState({
+        orientation: PageOrientation.Portrait,
+        pageSize: PageSize.A4,
+        imageFit: ImageFit.Fit,
+        grid: GridValue.OneByOne,
+        marginTop: 10,
+        marginRight: 10,
+        marginBottom: 10,
+        marginLeft: 10,
+        compression: CompressionLevel.Medium,
+        pageNumber: {
+            enabled: false,
+            position: PageNumberPosition.BottomCenter,
+            fontSize: 10,
+            color: '#000000',
+        },
+    });
+    const [isLoading, setIsLoading] = useState(false);
+    const [isDragging, setIsDragging] = useState(false);
+    const [draggedImageId, setDraggedImageId] = useState(null);
+
+    const handleFilesAdded = useCallback(async (files) => {
+        setIsLoading(true);
+        const newImages = [];
+        for (const file of Array.from(files)) {
+            let processedFile = file;
+            const isHeic = file.type === 'image/heic' || file.type === 'image/heif' || file.name.toLowerCase().endsWith('.heic');
+
+            if (isHeic) {
+                try {
+                    const heic2any = window.heic2any;
+                    if (!heic2any) {
+                        alert("HEIC conversion library not loaded.");
+                        continue;
+                    }
+                    const conversionResult = await heic2any({ blob: file, toType: "image/jpeg", quality: 0.9 });
+                    const blob = Array.isArray(conversionResult) ? conversionResult[0] : conversionResult;
+                    processedFile = new File([blob], `${file.name.split('.')[0]}.jpg`, { type: 'image/jpeg' });
+                } catch (error) {
+                    console.error("Error converting HEIC file:", error);
+                    alert(`Failed to convert ${file.name}. It might be an unsupported HEIC format.`);
+                    continue;
+                }
+            }
+
+            const newImage = {
+                id: `${processedFile.name}-${Date.now()}`,
+                file: processedFile,
+                previewUrl: URL.createObjectURL(processedFile),
+                rotation: 0,
+            };
+            newImages.push(newImage);
+        }
+        setImages(prev => [...prev, ...newImages]);
+        setIsLoading(false);
+    }, []);
+
+    const handleDelete = useCallback((id) => {
+        setImages(prev => prev.filter(img => img.id !== id));
+    }, []);
+
+    const handleRotate = useCallback((id) => {
+        setImages(prev => prev.map(img =>
+            img.id === id ? { ...img, rotation: (img.rotation + 90) % 360 } : img
+        ));
+    }, []);
+
+    const handleDragStart = (id) => {
+        setDraggedImageId(id);
+    };
+
+    const handleDrop = (targetId) => {
+        if (!draggedImageId) return;
+
+        const draggedIndex = images.findIndex(img => img.id === draggedImageId);
+        const targetIndex = images.findIndex(img => img.id === targetId);
+        
+        if (draggedIndex === -1 || targetIndex === -1) return;
+
+        const newImages = [...images];
+        const [draggedImage] = newImages.splice(draggedIndex, 1);
+        newImages.splice(targetIndex, 0, draggedImage);
+        setImages(newImages);
+        setDraggedImageId(null);
+    };
+
+    const handleConvert = async () => {
+        if (images.length === 0) {
+            alert("Please upload some images first.");
+            return;
+        }
+        setIsLoading(true);
+        try {
+            await generatePdf(images, settings);
+        } catch (error) {
+            console.error("Failed to generate PDF:", error);
+            alert("An error occurred while generating the PDF. Please check the console for details.");
+        } finally {
+            setIsLoading(false);
+        }
+    };
+    
+    return (
+        <div className="min-h-screen flex flex-col font-sans">
+            {isLoading && <Spinner />}
+            <Header />
+            <main className="flex-grow container mx-auto p-4 md:p-6 lg:p-8">
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    <div className="lg:col-span-1 bg-white rounded-xl shadow-lg p-6 h-fit sticky top-8">
+                        <SettingsPanel settings={settings} onSettingsChange={setSettings} onConvert={handleConvert} isDisabled={images.length === 0} />
+                    </div>
+                    <div className="lg:col-span-2">
+                        <ImageUpload onFilesAdded={handleFilesAdded} isDragging={isDragging} setIsDragging={setIsDragging} />
+                        {images.length > 0 && (
+                            <div className="mt-8">
+                                <h2 className="text-xl font-semibold text-slate-700 mb-4">Your Images</h2>
+                                <p className="text-sm text-slate-500 mb-4">Drag and drop to reorder the images.</p>
+                                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                                    {images.map((image) => (
+                                        <ImagePreview
+                                            key={image.id}
+                                            image={image}
+                                            onDelete={handleDelete}
+                                            onRotate={handleRotate}
+                                            onDragStart={handleDragStart}
+                                            onDrop={handleDrop}
+                                            isDragged={draggedImageId === image.id}
+                                        />
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </main>
+        </div>
+    );
+};
+
+// --- From index.tsx ---
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error("Could not find root element to mount to");
+}
+
+const root = ReactDOM.createRoot(rootElement);
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+    </script>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>
